@@ -1,0 +1,1274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StackFoundry</title>
+  <meta name="description" content="Technical writing for engineers. Deep dives on systems, web, AI/ML, and databases." />
+  <meta property="og:title" content="StackFoundry" />
+  <meta property="og:type" content="website" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,700;1,9..144,400&family=Inter:wght@400;500;600&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="favicon-32x32.png">
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+</head>
+
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+/* ─── sample data ─── */
+const POSTS = [
+  {
+    id: 1,
+    title: "How PostgreSQL's MVCC Engine Really Works",
+    tags: ["PostgreSQL", "Databases", "Systems"],
+    category: "Databases",
+    author: "Priya Shankar",
+    authorId: "priya",
+    date: "Nov 14, 2024",
+    readTime: 18,
+    views: 4823,
+    likes: 312,
+    status: "published",
+    excerpt: "Most developers know MVCC prevents read-write conflicts. Fewer understand how pg_xact, visibility maps, and tuple versioning combine to deliver consistent snapshots.",
+    body: `<h2 id="problem">The Problem MVCC Solves</h2>
+<p>Concurrency in databases is fundamentally a problem of isolation. Two transactions running simultaneously should observe a consistent view of data — even as that data is actively changing.</p>
+<p>The naive solution is locking: writers lock rows, readers wait. This works but serializes access and kills throughput. MVCC takes a different approach — it keeps multiple versions of each row, letting readers and writers operate simultaneously.</p>
+<h2 id="tuples">Tuple Versioning</h2>
+<p>In PostgreSQL, every row (called a <em>tuple</em>) carries hidden system columns. When you UPDATE a row, PostgreSQL doesn't overwrite in place — it marks the old tuple's <code>xmax</code> with the current transaction ID and inserts a new tuple with a fresh <code>xmin</code>.</p>
+<pre><code class="language-sql">-- See tuple visibility directly
+SELECT xmin, xmax, ctid, * FROM orders WHERE id = 1;</code></pre>
+<h2 id="snapshots">Snapshot Isolation</h2>
+<p>Each transaction takes a snapshot recording which transaction IDs are in-flight. When reading a tuple, PostgreSQL checks <code>xmin</code> and <code>xmax</code> against this snapshot to decide visibility.</p>
+<blockquote>Reads never block writes, and writes never block reads. The tradeoff is dead tuple accumulation — which is why VACUUM exists.</blockquote>
+<h2 id="vacuum">The VACUUM Problem</h2>
+<p>Every UPDATE leaves a dead tuple behind. Enough of these and your table bloats, sequential scans slow down, and indexes balloon. VACUUM reclaims space by finding tuples no longer visible to any active transaction.</p>
+<pre><code class="language-sql">-- Check for table bloat
+SELECT tablename, pg_size_pretty(pg_total_relation_size(tablename::regclass)) AS size
+FROM pg_tables
+ORDER BY pg_total_relation_size(tablename::regclass) DESC;</code></pre>`
+  },
+  {
+    id: 2,
+    title: "Zero-Copy Networking: Skipping the Memory Bottleneck",
+    tags: ["Systems", "Linux", "Networking"],
+    category: "Systems",
+    author: "Lukas Brenner",
+    authorId: "lukas",
+    date: "Nov 10, 2025",
+    readTime: 14,
+    views: 3241,
+    likes: 198,
+    status: "published",
+    excerpt: "Every byte sent over a socket traditionally passes through at least two copies in kernel memory. sendfile() and io_uring collapse this pipeline — here's how and when it matters.",
+    body: `<h2 id="traditional">The Traditional Path</h2>
+<p>When your app calls <code>write()</code> on a socket, the kernel copies data from userspace into a kernel buffer, then the NIC driver copies from that buffer into DMA memory. For servers pushing large files, this copying dominates CPU time.</p>
+<h2 id="sendfile">sendfile()</h2>
+<p>The classic fix. It lets the kernel move data directly from a file descriptor to a socket, bypassing userspace entirely.</p>
+<pre><code class="language-c">int file_fd = open("data.bin", O_RDONLY);
+// One syscall, no userspace copy
+sendfile(socket_fd, file_fd, NULL, file_size);</code></pre>
+<p>Nginx uses this by default. It's why a well-tuned server can saturate a 40 Gbps NIC while barely touching a CPU core.</p>
+<h2 id="io-uring">io_uring</h2>
+<p>Introduced in Linux 5.1, io_uring goes further — a shared ring buffer between kernel and userspace eliminates most syscall overhead. Combined with registered (pinned) buffers, it approaches true zero-copy for both sends and receives.</p>
+<pre><code class="language-c">struct io_uring ring;
+io_uring_queue_init(256, &ring, 0);
+
+struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+io_uring_prep_send(sqe, socket_fd, buf, len, 0);
+io_uring_submit(&ring);</code></pre>`
+  },
+  {
+    id: 3,
+    title: "React Server Components Are Not What You Think",
+    tags: ["React", "Web", "Architecture"],
+    category: "Web",
+    author: "Mina Okafor",
+    authorId: "mina",
+    date: "Nov 7, 2024",
+    readTime: 11,
+    views: 6102,
+    likes: 441,
+    status: "published",
+    excerpt: "The mental model most devs have for RSC is wrong. It's not SSR. It's a new rendering primitive that fundamentally changes how component trees compose.",
+    body: `<h2 id="confusion">Clearing Up the Confusion</h2>
+<p>Most RSC tutorials frame it as "SSR but better." That's misleading. RSC introduces a <em>component tree split</em>: some components execute only on the server and are serialized into a wire format. They never run on the client — not during hydration, not ever.</p>
+<h2 id="wire-format">The Wire Format</h2>
+<pre><code class="language-javascript">// Not HTML — a React element tree descriptor
+0:["$","div",null,{"children":["$","h1",null,{"children":"Hello"}]}]</code></pre>
+<p>Unlike SSR HTML, RSC output can be incrementally streamed, merged with existing client state, and re-fetched without a full page reload. The client React runtime understands this format and can diff against it normally.</p>
+<h2 id="benefits">What This Actually Enables</h2>
+<pre><code class="language-tsx">import { db } from '@/db';          // never ships to the browser
+import PDFParser from 'pdf-parse';  // 2.3MB library, zero client bundle cost
+
+export default async function Article({ id }: { id: string }) {
+  const post = await db.posts.findById(id); // direct DB access, no API layer
+  return <div>{post.content}</div>;
+}</code></pre>`
+  },
+  {
+    id: 4,
+    title: "Building a Lock-Free Ring Buffer in Rust",
+    tags: ["Rust", "Concurrency", "Systems"],
+    category: "Systems",
+    author: "Elena Volkov",
+    authorId: "elena",
+    date: "Oct 29, 2024",
+    readTime: 20,
+    views: 2987,
+    likes: 267,
+    status: "published",
+    excerpt: "Lock-free data structures are notoriously hard to get right. We'll implement a single-producer single-consumer ring buffer using Rust's atomic primitives and explain the memory ordering.",
+    body: `<h2 id="why">Why Lock-Free?</h2>
+<p>Mutexes serialize access. Under contention, every thread waiting on a lock is a CPU cycle wasted. A lock-free SPSC (single-producer, single-consumer) queue lets a producer and consumer truly run in parallel.</p>
+<h2 id="implementation">The Implementation</h2>
+<pre><code class="language-rust">use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::UnsafeCell;
+
+pub struct RingBuffer<T, const N: usize> {
+    buffer: [UnsafeCell<T>; N],
+    head: AtomicUsize,  // written only by producer
+    tail: AtomicUsize,  // written only by consumer
+}
+
+impl<T: Default, const N: usize> RingBuffer<T, N> {
+    pub fn push(&self, val: T) -> Result<(), T> {
+        let head = self.head.load(Ordering::Relaxed);
+        let next = (head + 1) % N;
+        if next == self.tail.load(Ordering::Acquire) {
+            return Err(val); // full
+        }
+        unsafe { *self.buffer[head].get() = val; }
+        self.head.store(next, Ordering::Release);
+        Ok(())
+    }
+}</code></pre>
+<h2 id="ordering">Memory Ordering</h2>
+<p>The producer uses <code>Release</code> when storing head — so the consumer's <code>Acquire</code> load on head guarantees it sees all buffer writes. This is the happens-before relationship that makes the whole thing safe.</p>`
+  },
+  {
+    id: 5,
+    title: "Gradient Checkpointing: Training Big Models on Small GPUs",
+    tags: ["AI/ML", "CUDA", "Python"],
+    category: "AI/ML",
+    author: "Thomas Wei",
+    authorId: "thomas",
+    date: "Oct 24, 2025",
+    readTime: 13,
+    views: 5521,
+    likes: 389,
+    status: "published",
+    excerpt: "Activation memory is the hidden killer of large model training. Checkpointing trades compute for memory by recomputing activations during backward pass instead of storing them.",
+    body: `<h2 id="problem">The Memory Problem</h2>
+<p>During a forward pass, every layer's activations must be kept alive for the backward pass. For a 48-layer transformer at batch size 32, this can exceed the model's own parameter memory by 10x.</p>
+<h2 id="checkpointing">How Checkpointing Works</h2>
+<p>Instead of storing all activations, you only keep them at checkpoint boundaries — say every 8 layers. During backward, when you need an intermediate activation, you rerun forward from the nearest checkpoint.</p>
+<pre><code class="language-python">import torch.utils.checkpoint as checkpoint
+
+class TransformerBlock(nn.Module):
+    def forward(self, x):
+        # Recomputed during backward, not stored in memory
+        return checkpoint.checkpoint(self._forward, x, use_reentrant=False)
+
+# This lets you fit a 13B model on a 24GB GPU
+for batch in dataloader:
+    with torch.amp.autocast('cuda'):
+        loss = model(batch)
+    scaler.scale(loss).backward()</code></pre>
+<h2 id="tradeoff">The Tradeoff</h2>
+<p>You pay roughly 33% extra compute in exchange for O(√N) memory instead of O(N). For memory-constrained workloads, this is almost always worth it.</p>`
+  },
+  {
+    id: 6,
+    title: "The Real Cost of ORM Abstractions vs. Raw SQL",
+    tags: ["Databases", "Performance", "Web"],
+    category: "Databases",
+    author: "Raj Venkatesh",
+    authorId: "raj",
+    date: "Nov 3, 2025",
+    readTime: 16,
+    views: 4109,
+    likes: 223,
+    status: "published",
+    excerpt: "ORMs promise productivity. They deliver — until they don't. A technical look at where query planner estimates diverge from ORM-generated SQL and how to catch it before production.",
+    body: `<h2 id="problem">The N+1 and Its Evil Twin</h2>
+<p>N+1 is well-known. The opposite pathology — cartesian product explosion from over-eager joins — is less talked about. Fetch a User with 3 relations, each with 50 rows, and your ORM might return 50³ = 125,000 rows before deduplication.</p>
+<h2 id="explain">Always Run EXPLAIN ANALYZE</h2>
+<pre><code class="language-sql">EXPLAIN (ANALYZE, BUFFERS)
+SELECT o.*, u.name
+FROM orders o
+  JOIN users u ON u.id = o.user_id
+WHERE o.status = 'pending'
+  AND o.created_at > NOW() - INTERVAL '7 days';
+
+-- Look for: Seq Scan on large tables, unexpectedly high row counts</code></pre>
+<p>Running this on ORM-generated queries regularly is the single highest-leverage habit for database performance.</p>
+<h2 id="when">Know the Boundary</h2>
+<p>ORMs are excellent for CRUD. Reach for raw SQL as soon as you have more than two or three joins, any aggregation, or anything that looks like a report.</p>`
+  }
+];
+
+const AUTHORS = [
+  { id: "priya", name: "Priya Shankar", role: "Senior Engineer", bio: "Database internals enthusiast. Previously at Stripe and MongoDB. I write about storage engines, query optimizers, and distributed systems.", avatar: "PS", articles: 12, followers: 1840, joined: "Mar 2022", links: ["Twitter", "GitHub"] },
+  { id: "lukas", name: "Lukas Brenner", role: "Systems Engineer", bio: "Low-level systems programmer. Five years at the Linux kernel level, now at a high-frequency trading firm.", avatar: "LB", articles: 9, followers: 1240, joined: "Jun 2022", links: ["GitHub", "LinkedIn"] },
+  { id: "mina", name: "Mina Okafor", role: "Frontend Architect", bio: "Web platform engineer focused on performance and DX. React core contributor.", avatar: "MO", articles: 15, followers: 2310, joined: "Jan 2022", links: ["Twitter", "GitHub"] },
+  { id: "elena", name: "Elena Volkov", role: "Rust Developer", bio: "Concurrent systems, lock-free data structures, and language design. Rust enthusiast since 2016.", avatar: "EV", articles: 8, followers: 980, joined: "Sep 2022", links: ["GitHub"] },
+  { id: "thomas", name: "Thomas Wei", role: "ML Engineer", bio: "Training large language models efficiently. Research background at Stanford AI Lab.", avatar: "TW", articles: 11, followers: 3210, joined: "Nov 2021", links: ["Twitter", "GitHub"] },
+  { id: "raj", name: "Raj Venkatesh", role: "Backend Engineer", bio: "Databases, caching, and API design. PostgreSQL power user. Open source contributor.", avatar: "RV", articles: 7, followers: 760, joined: "Jul 2022", links: ["GitHub", "LinkedIn"] }
+];
+
+const INITIAL_COMMENTS = {
+  1: [
+    { id: 1, author: "Alex Kim", avatar: "AK", date: "Nov 15, 2024", text: "Fantastic deep-dive. The visibility map explanation finally clicked for me. Would love a follow-up on HOT updates.", likes: 14 },
+    { id: 2, author: "Maria Chen", avatar: "MC", date: "Nov 16, 2024", text: "The VACUUM section is gold. We had a bloat incident last month — this would have helped us debug much faster.", likes: 8 }
+  ],
+  2: [{ id: 1, author: "Jake Torres", avatar: "JT", date: "Nov 11, 2024", text: "sendfile is so underutilized. Great coverage of io_uring too.", likes: 21 }],
+  3: [{ id: 1, author: "Dev Sharma", avatar: "DS", date: "Nov 8, 2024", text: "Finally a clear explanation of the wire format. Better than any video I've watched.", likes: 33 }]
+};
+
+/* ─── helpers ─── */
+function readTime(text) {
+  const words = (text || "").replace(/<[^>]+>/g, "").split(/\s+/).filter(Boolean).length;
+  return Math.max(1, Math.ceil(words / 200));
+}
+
+function markdownToHtml(md) {
+  return md
+    .replace(/^### (.+)$/gm, "<h3>$1</h3>")
+    .replace(/^## (.+)$/gm, "<h2>$1</h2>")
+    .replace(/^# (.+)$/gm, "<h1>$1</h1>")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/```(\w+)?\n([\s\S]+?)```/g, (_, lang, code) =>
+      `<pre><code class="language-${lang || "text"}">${code.trim()}</code></pre>`)
+    .replace(/^> (.+)$/gm, "<blockquote>$1</blockquote>")
+    .split("\n\n")
+    .map(block => block.startsWith("<") ? block : `<p>${block}</p>`)
+    .join("\n");
+}
+
+function extractToc(html) {
+  return [...html.matchAll(/<h([23])[^>]*id="([^"]*)"[^>]*>([^<]+)<\/h[23]>/g)]
+    .map(m => ({ level: +m[1], id: m[2], text: m[3] }));
+}
+
+/* ─── App ─── */
+function App() {
+  const [theme, setTheme] = useState("light");
+  const [page, setPage] = useState("home");
+  const [pageParam, setPageParam] = useState(null);
+  const [posts, setPosts] = useState(POSTS);
+  const [comments, setComments] = useState(INITIAL_COMMENTS);
+  const [likes, setLikes] = useState({});
+  const [bookmarks, setBookmarks] = useState([]);
+  const [user, setUser] = useState(null);
+  const [authModal, setAuthModal] = useState(null);
+  const [toasts, setToasts] = useState([]);
+  const [search, setSearch] = useState("");
+  const [filterTag, setFilterTag] = useState("all");
+  const [filterCat, setFilterCat] = useState("all");
+  const [progress, setProgress] = useState(0);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [nlEmail, setNlEmail] = useState("");
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const onScroll = () => {
+      const el = document.documentElement;
+      setProgress((el.scrollTop / (el.scrollHeight - el.clientHeight)) * 100 || 0);
+    };
+    window.addEventListener("scroll", onScroll);
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    try { hljs.highlightAll(); } catch (e) {}
+  });
+
+  function toast(msg, type = "info") {
+    const id = Date.now();
+    setToasts(prev => [...prev, { id, msg, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+  }
+
+  function go(p, param = null) {
+    setPage(p);
+    setPageParam(param);
+    setShowUserMenu(false);
+    window.scrollTo(0, 0);
+  }
+
+  function toggleLike(postId) {
+    if (!user) { setAuthModal("login"); return; }
+    const isLiked = likes[postId];
+    setLikes(prev => ({ ...prev, [postId]: !isLiked }));
+    setPosts(prev => prev.map(p => p.id === postId ? { ...p, likes: p.likes + (isLiked ? -1 : 1) } : p));
+    toast(isLiked ? "Like removed" : "Article liked ❤️", "success");
+  }
+
+  function toggleBookmark(postId) {
+    if (!user) { setAuthModal("login"); return; }
+    const isSaved = bookmarks.includes(postId);
+    setBookmarks(prev => isSaved ? prev.filter(id => id !== postId) : [...prev, postId]);
+    toast(isSaved ? "Removed from saved" : "Saved for later 🔖", "success");
+  }
+
+  function login(data) {
+    setUser({ name: data.name || data.email.split("@")[0], email: data.email, avatar: (data.name || data.email).slice(0, 2).toUpperCase() });
+    setAuthModal(null);
+    toast(`Welcome back!`, "success");
+  }
+
+  function logout() {
+    setUser(null);
+    setShowUserMenu(false);
+    toast("Logged out", "info");
+  }
+
+  function publishPost(draft) {
+    const newPost = {
+      ...draft,
+      id: posts.length + 1,
+      date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+      views: 0,
+      likes: 0,
+      author: user?.name || "Anonymous",
+      authorId: "user",
+      readTime: readTime(draft.body),
+      body: markdownToHtml(draft.rawBody || draft.body)
+    };
+    setPosts(prev => [newPost, ...prev]);
+    toast("Article published! 🚀", "success");
+    go("home");
+  }
+
+  function addComment(postId, text) {
+    if (!user) { setAuthModal("login"); return; }
+    const c = { id: Date.now(), author: user.name, avatar: user.avatar, date: "Just now", text, likes: 0 };
+    setComments(prev => ({ ...prev, [postId]: [...(prev[postId] || []), c] }));
+    toast("Comment posted!", "success");
+  }
+
+  const visiblePosts = useMemo(() => {
+    let result = [...posts];
+    if (filterCat !== "all") result = result.filter(p => p.category === filterCat);
+    if (filterTag !== "all") result = result.filter(p => p.tags.some(t => t.toLowerCase() === filterTag.toLowerCase()));
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      result = result.filter(p =>
+        p.title.toLowerCase().includes(q) ||
+        p.excerpt.toLowerCase().includes(q) ||
+        p.tags.some(t => t.toLowerCase().includes(q))
+      );
+    }
+    return result;
+  }, [posts, filterCat, filterTag, search]);
+
+  const allTags = useMemo(() => [...new Set(posts.flatMap(p => p.tags))], [posts]);
+
+  return (
+    <>
+      {/* reading progress */}
+      <div className="progress-bar">
+        <div className="progress-bar-fill" style={{ width: progress + "%" }} />
+      </div>
+
+      {/* navbar */}
+      <nav className="navbar">
+        <div className="navbar-inner">
+          <button onClick={() => go("home")} className="logo">
+            Stack<span>Foundry</span>
+          </button>
+
+          <div className="nav-links">
+            <button onClick={() => go("home")} className={`nav-link ${page === "home" ? "active" : ""}`}>Feed</button>
+            {["Web", "Systems", "AI/ML", "Databases"].map(cat => (
+              <button key={cat} onClick={() => { go("home"); setFilterCat(cat); setFilterTag("all"); }}
+                className={`nav-link ${filterCat === cat && page === "home" ? "active" : ""}`}>{cat}</button>
+            ))}
+          </div>
+
+          <div className="nav-right">
+            <button className="btn-icon" onClick={() => setTheme(t => t === "light" ? "dark" : "light")} title="Toggle dark mode">
+              {theme === "light" ? "🌙" : "☀️"}
+            </button>
+
+            {user ? (
+              <>
+                <button className="btn btn-secondary btn-sm" onClick={() => go("editor")}>+ Write</button>
+                <div className="dropdown-wrap">
+                  <div className="avatar" onClick={() => setShowUserMenu(m => !m)}>{user.avatar}</div>
+                  {showUserMenu && (
+                    <div className="dropdown">
+                      <div className="dropdown-item">👤 {user.name}</div>
+                      <div className="dropdown-sep" />
+                      <div className="dropdown-item" onClick={() => go("bookmarks")}>🔖 Saved</div>
+                      <div className="dropdown-item" onClick={() => go("editor")}>✏️ New Article</div>
+                      <div className="dropdown-item" onClick={() => go("admin")}>⚙️ Dashboard</div>
+                      <div className="dropdown-sep" />
+                      <div className="dropdown-item" onClick={logout}>↩ Log out</div>
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <button className="btn btn-ghost btn-sm" onClick={() => setAuthModal("login")}>Log in</button>
+                <button className="btn btn-primary btn-sm" onClick={() => setAuthModal("signup")}>Sign up</button>
+              </>
+            )}
+          </div>
+        </div>
+      </nav>
+
+      {/* pages */}
+      {page === "home" && (
+        <HomePage
+          posts={visiblePosts} allPosts={posts} allTags={allTags}
+          filterTag={filterTag} filterCat={filterCat}
+          setFilterTag={setFilterTag} setFilterCat={setFilterCat}
+          search={search} setSearch={setSearch}
+          likes={likes} bookmarks={bookmarks}
+          toggleLike={toggleLike} toggleBookmark={toggleBookmark}
+          go={go} setAuthModal={setAuthModal} user={user}
+          nlEmail={nlEmail} setNlEmail={setNlEmail} toast={toast}
+        />
+      )}
+      {page === "article" && (
+        <ArticlePage
+          post={posts.find(p => p.id === pageParam)}
+          allPosts={posts}
+          likes={likes} bookmarks={bookmarks}
+          toggleLike={toggleLike} toggleBookmark={toggleBookmark}
+          comments={comments[pageParam] || []}
+          addComment={(text) => addComment(pageParam, text)}
+          go={go} user={user} setAuthModal={setAuthModal}
+        />
+      )}
+      {page === "author" && (
+        <AuthorPage
+          author={AUTHORS.find(a => a.id === pageParam)}
+          posts={posts.filter(p => p.authorId === pageParam)}
+          likes={likes} bookmarks={bookmarks}
+          toggleLike={toggleLike} toggleBookmark={toggleBookmark}
+          go={go}
+        />
+      )}
+      {page === "bookmarks" && (
+        <BookmarksPage
+          posts={posts.filter(p => bookmarks.includes(p.id))}
+          likes={likes} bookmarks={bookmarks}
+          toggleLike={toggleLike} toggleBookmark={toggleBookmark}
+          go={go}
+        />
+      )}
+      {page === "editor" && (
+        <EditorPage user={user} onPublish={publishPost} go={go} />
+      )}
+      {page === "admin" && (
+        <AdminPage posts={posts} authors={AUTHORS} comments={comments} go={go} />
+      )}
+
+      {/* footer */}
+      <footer className="footer">
+        <div className="footer-inner">
+          <div className="footer-brand">
+            <span className="logo">Stack<span>Foundry</span></span>
+            <p className="footer-desc">Technical writing for engineers who want to understand how things actually work.</p>
+            <div className="footer-links">
+              {["Twitter", "GitHub", "RSS"].map(s => (
+                <button key={s} className="btn btn-ghost btn-sm">{s}</button>
+              ))}
+            </div>
+          </div>
+          <div className="footer-col">
+            <h4>Topics</h4>
+            <ul>{["Systems", "Web", "AI/ML", "Databases", "DevOps", "Security"].map(t => <li key={t} onClick={() => { go("home"); setFilterCat(t); }}>{t}</li>)}</ul>
+          </div>
+          <div className="footer-col">
+            <h4>Site</h4>
+            <ul>{["About", "Write for Us", "Editorial Process", "Newsletter"].map(l => <li key={l}>{l}</li>)}</ul>
+          </div>
+          <div className="footer-col">
+            <h4>Legal</h4>
+            <ul>{["Privacy", "Terms", "Cookies"].map(l => <li key={l}>{l}</li>)}</ul>
+          </div>
+        </div>
+        <div className="footer-bottom">
+          <span>© 2026 StackFoundry</span>
+          <span>Built for engineers who read the source</span>
+        </div>
+      </footer>
+
+      {/* auth modal */}
+      {authModal && <AuthModal mode={authModal} setMode={setAuthModal} onLogin={login} onClose={() => setAuthModal(null)} />}
+
+      {/* toasts */}
+      <div className="toast-stack">
+        {toasts.map(t => (
+          <div key={t.id} className="toast">{t.msg}</div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+/* ─── Home Page ─── */
+function HomePage({ posts, allPosts, allTags, filterTag, filterCat, setFilterTag, setFilterCat, search, setSearch, likes, bookmarks, toggleLike, toggleBookmark, go, setAuthModal, user, nlEmail, setNlEmail, toast }) {
+  const featured = allPosts[0];
+  const trending = [...allPosts].sort((a, b) => b.views - a.views).slice(0, 4);
+
+  return (
+    <>
+      {/* hero */}
+      <section className="hero">
+        <div className="hero-inner">
+          <div>
+            <p className="hero-label">Technical Writing for Engineers</p>
+            <h1>Where engineers go to <em>think</em> deeper.</h1>
+            <p className="hero-sub">
+              StackFoundry covers systems design, low-level programming, web architecture, and databases.
+              No beginner tutorials recycled as "deep dives."
+            </p>
+            <div className="hero-actions">
+              <button className="btn btn-primary" onClick={() => document.getElementById("feed")?.scrollIntoView({ behavior: "smooth" })}>
+                Browse articles
+              </button>
+              {!user && (
+                <button className="btn btn-ghost" onClick={() => setAuthModal("signup")}>
+                  Join free
+                </button>
+              )}
+            </div>
+          </div>
+
+          {featured && (
+            <div className="featured-card" onClick={() => go("article", featured.id)}>
+              <span className="featured-badge">Featured</span>
+              <div className="post-tags" style={{ marginBottom: 10 }}>
+                {featured.tags.slice(0, 2).map(t => <span key={t} className="tag">{t}</span>)}
+              </div>
+              <h2 className="featured-title">{featured.title}</h2>
+              <p className="featured-excerpt">{featured.excerpt}</p>
+              <PostMeta post={featured} go={go} />
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* stats */}
+      <div className="stats-bar">
+        <div className="stats-bar-inner">
+          {[
+            { num: "143", label: "Articles" },
+            { num: "28k", label: "Monthly readers" },
+            { num: "12 min", label: "Avg. read time" },
+            { num: "6", label: "Expert authors" },
+          ].map(s => (
+            <div key={s.label} className="stat-item">
+              <span className="stat-number">{s.num}</span>
+              <span className="stat-label">{s.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* feed */}
+      <div className="page-content" id="feed">
+        <main>
+          <div className="section-title">
+            {filterCat !== "all" ? filterCat : filterTag !== "all" ? filterTag : search ? `"${search}"` : "Latest"}
+            {(filterTag !== "all" || filterCat !== "all" || search) && (
+              <button onClick={() => { setFilterTag("all"); setFilterCat("all"); setSearch(""); }}>
+                Clear filters
+              </button>
+            )}
+          </div>
+
+          <div className="search-wrap">
+            <input
+              className="search-input"
+              placeholder="Search articles..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
+            <span className="search-icon">⌕</span>
+          </div>
+
+          <div className="filter-row">
+            {["all", ...allTags.slice(0, 8)].map(t => (
+              <span
+                key={t}
+                className={`tag ${filterTag === t ? "active" : ""}`}
+                onClick={() => setFilterTag(t)}
+              >
+                {t === "all" ? "All" : t}
+              </span>
+            ))}
+          </div>
+
+          {posts.length === 0 ? (
+            <div className="empty">
+              <h3>No articles found</h3>
+              <p>Try a different search term or tag.</p>
+            </div>
+          ) : (
+            posts.map(post => (
+              <div key={post.id} className="post-item">
+                <div className="post-tags">
+                  {post.tags.map(t => (
+                    <span key={t} className="tag" onClick={e => { e.stopPropagation(); setFilterTag(t); }}>{t}</span>
+                  ))}
+                </div>
+                <h2 className="post-title" onClick={() => go("article", post.id)}>{post.title}</h2>
+                <p className="post-excerpt" onClick={() => go("article", post.id)}>{post.excerpt}</p>
+                <div className="post-meta">
+                  <span className="post-author" onClick={() => go("author", post.authorId)}>{post.author}</span>
+                  <span className="post-meta-sep">·</span>
+                  <span>{post.date}</span>
+                  <span className="post-meta-sep">·</span>
+                  <span>{post.readTime} min read</span>
+                  <span className="post-meta-sep">·</span>
+                  <span>{post.views.toLocaleString()} views</span>
+                  <div className="post-actions">
+                    <button className={`action-btn ${likes[post.id] ? "liked" : ""}`} onClick={() => toggleLike(post.id)}>
+                      ♥ {post.likes}
+                    </button>
+                    <button className={`action-btn ${bookmarks.includes(post.id) ? "saved" : ""}`} onClick={() => toggleBookmark(post.id)}>
+                      🔖
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </main>
+
+        {/* sidebar */}
+        <aside className="sidebar">
+          <div className="newsletter">
+            <h3>The Foundry Letter</h3>
+            <p>One technical deep-dive every Thursday. No news roundups — just real engineering content.</p>
+            <input className="nl-input" type="email" placeholder="you@example.com" value={nlEmail} onChange={e => setNlEmail(e.target.value)} />
+            <button className="nl-btn" onClick={() => { if (nlEmail) { toast("Subscribed! 📬", "success"); setNlEmail(""); } else toast("Enter your email first", "error"); }}>
+              Subscribe — free
+            </button>
+          </div>
+
+          <div>
+            <div className="section-title">Trending</div>
+            {trending.map((post, i) => (
+              <div key={post.id} className="trending-item" onClick={() => go("article", post.id)}>
+                <span className="trending-num">0{i + 1}</span>
+                <div>
+                  <div className="trending-title">{post.title}</div>
+                  <div className="trending-meta">{post.author} · {post.readTime} min · {post.views.toLocaleString()} views</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div>
+            <div className="section-title">Topics</div>
+            <div className="filter-row">
+              {[...new Set(allPosts.flatMap(p => p.tags))].map(t => (
+                <span key={t} className={`tag ${filterTag === t ? "active" : ""}`} onClick={() => setFilterTag(t)}>{t}</span>
+              ))}
+            </div>
+          </div>
+        </aside>
+      </div>
+    </>
+  );
+}
+
+/* ─── Article Page ─── */
+function ArticlePage({ post, allPosts, likes, bookmarks, toggleLike, toggleBookmark, comments, addComment, go, user, setAuthModal }) {
+  const [commentText, setCommentText] = useState("");
+
+  useEffect(() => {
+    try { hljs.highlightAll(); } catch (e) {}
+  });
+
+  if (!post) return (
+    <div style={{ padding: "48px 24px", maxWidth: "var(--max-w)", margin: "0 auto" }}>
+      <button className="back-btn" onClick={() => go("home")}>← Back</button>
+      <p>Post not found.</p>
+    </div>
+  );
+
+  const toc = extractToc(post.body);
+  const related = allPosts.filter(p => p.id !== post.id && p.tags.some(t => post.tags.includes(t))).slice(0, 4);
+
+  return (
+    <div className="article-page">
+      <button className="back-btn" onClick={() => go("home")}>← Back to feed</button>
+
+      <div className="article-grid">
+        <article>
+          <div className="post-tags" style={{ marginBottom: 12 }}>
+            {post.tags.map(t => <span key={t} className="tag">{t}</span>)}
+          </div>
+
+          <h1 className="article-title">{post.title}</h1>
+
+          <div className="article-meta">
+            <span className="article-author" onClick={() => go("author", post.authorId)}>{post.author}</span>
+            <span>·</span>
+            <span>{post.date}</span>
+            <span>·</span>
+            <span>{post.readTime} min read</span>
+            <span>·</span>
+            <span>{post.views.toLocaleString()} views</span>
+            <div className="article-big-actions">
+              <button className={`big-btn ${likes[post.id] ? "liked" : ""}`} onClick={() => toggleLike(post.id)}>
+                ♥ {post.likes + (likes[post.id] ? 1 : 0)}
+              </button>
+              <button className={`big-btn ${bookmarks.includes(post.id) ? "saved" : ""}`} onClick={() => toggleBookmark(post.id)}>
+                🔖 {bookmarks.includes(post.id) ? "Saved" : "Save"}
+              </button>
+            </div>
+          </div>
+
+          <div className="article-body" dangerouslySetInnerHTML={{ __html: post.body }} />
+
+          {/* related */}
+          {related.length > 0 && (
+            <div className="related">
+              <div className="section-title">Related Articles</div>
+              <div className="related-grid">
+                {related.map(r => (
+                  <div key={r.id} className="related-card" onClick={() => go("article", r.id)}>
+                    <div className="post-tags" style={{ marginBottom: 6 }}>
+                      {r.tags.slice(0, 2).map(t => <span key={t} className="tag">{t}</span>)}
+                    </div>
+                    <div className="related-card-title">{r.title}</div>
+                    <div className="related-card-meta">{r.author} · {r.readTime} min</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* comments */}
+          <div className="comments">
+            <div className="section-title">Discussion ({comments.length})</div>
+            {comments.map(c => (
+              <div key={c.id} className="comment">
+                <div className="comment-avatar">{c.avatar}</div>
+                <div>
+                  <span className="comment-author">{c.author}</span>
+                  <span className="comment-date">{c.date}</span>
+                  <p className="comment-text">{c.text}</p>
+                  <button className="comment-like">♥ {c.likes}</button>
+                </div>
+              </div>
+            ))}
+
+            {user ? (
+              <div className="comment-box">
+                <textarea
+                  className="comment-textarea"
+                  placeholder="Share your thoughts..."
+                  value={commentText}
+                  onChange={e => setCommentText(e.target.value)}
+                />
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                  <button className="btn btn-primary btn-sm" onClick={() => {
+                    if (commentText.trim()) { addComment(commentText); setCommentText(""); }
+                  }}>Post comment</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ padding: "24px", textAlign: "center", background: "var(--bg-subtle)", borderRadius: 8, border: "1px dashed var(--border)" }}>
+                <p style={{ color: "var(--text-muted)", marginBottom: 12 }}>Sign in to join the discussion</p>
+                <button className="btn btn-primary btn-sm" onClick={() => setAuthModal("login")}>Log in or sign up</button>
+              </div>
+            )}
+          </div>
+        </article>
+
+        {/* table of contents */}
+        {toc.length > 0 && (
+          <aside>
+            <div className="toc">
+              <div className="toc-heading">On this page</div>
+              {toc.map(h => (
+                <div
+                  key={h.id}
+                  className={`toc-link ${h.level === 3 ? "h3" : ""}`}
+                  onClick={() => document.getElementById(h.id)?.scrollIntoView({ behavior: "smooth" })}
+                >
+                  {h.text}
+                </div>
+              ))}
+            </div>
+
+            <div style={{ marginTop: 16, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 10 }}>
+              <div style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--text-faint)", marginBottom: 8 }}>Author</div>
+              <div style={{ fontWeight: 500, cursor: "pointer", marginBottom: 4 }} onClick={() => go("author", post.authorId)}>{post.author}</div>
+              <div style={{ fontSize: "0.78rem", color: "var(--text-faint)" }}>{post.readTime} min · {post.views.toLocaleString()} views</div>
+            </div>
+          </aside>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Author Page ─── */
+function AuthorPage({ author, posts, likes, bookmarks, toggleLike, toggleBookmark, go }) {
+  if (!author) return null;
+  return (
+    <>
+      <div className="author-header">
+        <div className="author-header-inner">
+          <div className="author-avatar-lg">{author.avatar}</div>
+          <div>
+            <h1 className="author-name">{author.name}</h1>
+            <p className="author-role">{author.role}</p>
+            <p className="author-bio">{author.bio}</p>
+            <div className="author-links" style={{ marginBottom: 16 }}>
+              {author.links.map(l => <button key={l} className="btn btn-ghost btn-sm">{l}</button>)}
+            </div>
+            <div className="author-stats">
+              {[
+                { num: author.articles, label: "Articles" },
+                { num: author.followers.toLocaleString(), label: "Followers" },
+                { num: author.joined, label: "Joined" },
+              ].map(s => (
+                <div key={s.label} className="author-stat">
+                  <span className="author-stat-num">{s.num}</span>
+                  <span className="author-stat-label">{s.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: "var(--max-w)", margin: "0 auto", padding: "40px 24px" }}>
+        <div className="section-title">Articles by {author.name.split(" ")[0]}</div>
+        {posts.map(post => (
+          <div key={post.id} className="post-item">
+            <div className="post-tags">
+              {post.tags.map(t => <span key={t} className="tag">{t}</span>)}
+            </div>
+            <h2 className="post-title" onClick={() => go("article", post.id)}>{post.title}</h2>
+            <p className="post-excerpt">{post.excerpt}</p>
+            <div className="post-meta">
+              <span>{post.date}</span>
+              <span className="post-meta-sep">·</span>
+              <span>{post.readTime} min read</span>
+              <span className="post-meta-sep">·</span>
+              <span>{post.views.toLocaleString()} views</span>
+              <div className="post-actions">
+                <button className={`action-btn ${likes[post.id] ? "liked" : ""}`} onClick={() => toggleLike(post.id)}>♥ {post.likes}</button>
+                <button className={`action-btn ${bookmarks.includes(post.id) ? "saved" : ""}`} onClick={() => toggleBookmark(post.id)}>🔖</button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+/* ─── Bookmarks Page ─── */
+function BookmarksPage({ posts, likes, bookmarks, toggleLike, toggleBookmark, go }) {
+  return (
+    <div className="bookmarks-page">
+      <h1 style={{ fontFamily: "var(--font-serif)", fontSize: "1.75rem", fontWeight: 400, marginBottom: 6 }}>Saved Articles</h1>
+      <p style={{ color: "var(--text-muted)", marginBottom: 32 }}>{posts.length} article{posts.length !== 1 ? "s" : ""} saved</p>
+
+      {posts.length === 0 ? (
+        <div className="empty">
+          <h3>Nothing saved yet</h3>
+          <p>Hit the bookmark icon on any article to save it here.</p>
+        </div>
+      ) : (
+        posts.map(post => (
+          <div key={post.id} className="post-item">
+            <div className="post-tags">
+              {post.tags.map(t => <span key={t} className="tag">{t}</span>)}
+            </div>
+            <h2 className="post-title" onClick={() => go("article", post.id)}>{post.title}</h2>
+            <p className="post-excerpt">{post.excerpt}</p>
+            <div className="post-meta">
+              <span className="post-author" onClick={() => go("author", post.authorId)}>{post.author}</span>
+              <span className="post-meta-sep">·</span>
+              <span>{post.readTime} min read</span>
+              <div className="post-actions">
+                <button className={`action-btn ${likes[post.id] ? "liked" : ""}`} onClick={() => toggleLike(post.id)}>♥ {post.likes}</button>
+                <button className="action-btn saved" onClick={() => toggleBookmark(post.id)}>🔖 Remove</button>
+              </div>
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+/* ─── Editor Page ─── */
+function EditorPage({ user, onPublish, go }) {
+  const [title, setTitle] = useState("");
+  const [rawBody, setRawBody] = useState("## Introduction\n\nWrite your article here...\n\n```javascript\nconsole.log('hello world');\n```");
+  const [tags, setTags] = useState("");
+  const [category, setCategory] = useState("Web");
+  const [status, setStatus] = useState("published");
+  const [preview, setPreview] = useState(false);
+
+  if (!user) return (
+    <div style={{ padding: "48px 24px", maxWidth: 600, margin: "0 auto", textAlign: "center" }}>
+      <h2 style={{ fontFamily: "var(--font-serif)", fontWeight: 400, marginBottom: 12 }}>Sign in to write</h2>
+      <p style={{ color: "var(--text-muted)", marginBottom: 20 }}>You need an account to publish on StackFoundry.</p>
+      <button className="btn btn-primary" onClick={() => go("home")}>← Go back</button>
+    </div>
+  );
+
+  const wordCount = rawBody.split(/\s+/).filter(Boolean).length;
+
+  return (
+    <div className="editor-page">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <button className="back-btn" onClick={() => go("home")}>← Back</button>
+        <span style={{ fontSize: "0.8rem", color: "var(--text-faint)" }}>
+          {wordCount} words · ~{Math.max(1, Math.ceil(wordCount / 200))} min read
+        </span>
+      </div>
+
+      <div className="editor-toolbar">
+        {[["## Heading", "## "], ["**Bold**", "**bold**"], ["*Italic*", "*italic*"], ["`code`", "`code`"]].map(([label, snippet]) => (
+          <button key={label} className="toolbar-btn" onClick={() => setRawBody(b => b + "\n" + snippet)}>{label}</button>
+        ))}
+        <div className="toolbar-sep" />
+        <button className="toolbar-btn" onClick={() => setRawBody(b => b + "\n```javascript\n// code here\n```")}>Code block</button>
+        <button className="toolbar-btn" onClick={() => setRawBody(b => b + "\n> Blockquote")}>Quote</button>
+        <div className="toolbar-sep" />
+        <button className="toolbar-btn" style={{ marginLeft: "auto", color: preview ? "var(--accent)" : "" }} onClick={() => setPreview(p => !p)}>
+          {preview ? "✎ Edit" : "👁 Preview"}
+        </button>
+      </div>
+
+      <input
+        className="title-input"
+        placeholder="Article title..."
+        value={title}
+        onChange={e => setTitle(e.target.value)}
+      />
+
+      {preview ? (
+        <div style={{ padding: 20, border: "1px solid var(--border)", borderRadius: "0 0 8px 8px", minHeight: 400, background: "var(--bg-subtle)" }}>
+          <h1 style={{ fontFamily: "var(--font-serif)", fontSize: "2rem", fontWeight: 400, marginBottom: 24 }}>{title || "Untitled"}</h1>
+          <div className="article-body" dangerouslySetInnerHTML={{ __html: markdownToHtml(rawBody) }} />
+        </div>
+      ) : (
+        <textarea
+          className="body-textarea"
+          value={rawBody}
+          onChange={e => setRawBody(e.target.value)}
+          spellCheck={false}
+        />
+      )}
+
+      <div className="editor-meta-row">
+        <div>
+          <label>Category</label>
+          <select className="meta-input" value={category} onChange={e => setCategory(e.target.value)}>
+            {["Web", "Systems", "AI/ML", "Databases", "DevOps", "Security"].map(c => <option key={c}>{c}</option>)}
+          </select>
+        </div>
+        <div>
+          <label>Tags (comma-separated)</label>
+          <input className="meta-input" placeholder="React, Performance, Architecture" value={tags} onChange={e => setTags(e.target.value)} />
+        </div>
+        <div>
+          <label>Status</label>
+          <select className="meta-input" value={status} onChange={e => setStatus(e.target.value)}>
+            <option value="published">Published</option>
+            <option value="draft">Draft</option>
+          </select>
+        </div>
+        <div>
+          <label>Cover Image URL (optional)</label>
+          <input className="meta-input" placeholder="https://..." />
+        </div>
+      </div>
+
+      <div className="editor-footer">
+        <button className="btn btn-ghost">Save draft</button>
+        <button className="btn btn-primary" onClick={() => {
+          if (!title.trim()) { alert("Add a title first"); return; }
+          onPublish({
+            title,
+            rawBody,
+            body: markdownToHtml(rawBody),
+            tags: tags.split(",").map(t => t.trim()).filter(Boolean),
+            category,
+            status,
+            excerpt: rawBody.replace(/[#*`>]/g, "").slice(0, 180) + "…"
+          });
+        }}>
+          {status === "draft" ? "Save Draft" : "Publish →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Admin Page ─── */
+function AdminPage({ posts, authors, comments, go }) {
+  const [tab, setTab] = useState("overview");
+
+  const totalViews = posts.reduce((sum, p) => sum + p.views, 0);
+  const totalLikes = posts.reduce((sum, p) => sum + p.likes, 0);
+  const totalComments = Object.values(comments).flat().length;
+  const barData = [42, 58, 39, 71, 65, 88, 54, 79, 93, 67, 45, 81];
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  const tabs = [
+    { id: "overview", label: "📊 Overview" },
+    { id: "posts", label: "📝 Posts" },
+    { id: "users", label: "👥 Authors" },
+    { id: "comments", label: "💬 Comments" },
+    { id: "analytics", label: "📈 Analytics" },
+  ];
+
+  return (
+    <div className="admin-page">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h1 style={{ fontFamily: "var(--font-serif)", fontWeight: 400, fontSize: "1.75rem" }}>Dashboard</h1>
+        <button className="btn btn-primary btn-sm" onClick={() => go("editor")}>+ New Article</button>
+      </div>
+
+      <div className="admin-grid">
+        <div className="admin-nav">
+          {tabs.map(t => (
+            <button key={t.id} className={`admin-nav-item ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div>
+          {tab === "overview" && (
+            <>
+              <div className="metric-cards">
+                {[
+                  { num: posts.length, label: "Total posts", trend: "+3 this week" },
+                  { num: totalViews.toLocaleString(), label: "Total views", trend: "+12% this month" },
+                  { num: totalLikes, label: "Total likes", trend: "+8% this month" },
+                  { num: totalComments, label: "Comments", trend: "+8 today" },
+                ].map(m => (
+                  <div key={m.label} className="metric-card">
+                    <span className="metric-num">{m.num}</span>
+                    <div className="metric-label">{m.label}</div>
+                    <div className="metric-trend">{m.trend}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 10, padding: 20 }}>
+                <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--text-faint)", marginBottom: 16 }}>Monthly views (2024)</div>
+                <div className="bar-chart">
+                  {barData.map((v, i) => <div key={i} className="bar" style={{ height: (v / Math.max(...barData) * 100) + "%" }} title={`${months[i]}: ${v}k`} />)}
+                </div>
+                <div className="bar-labels">
+                  {months.map(m => <div key={m} className="bar-label">{m}</div>)}
+                </div>
+              </div>
+            </>
+          )}
+
+          {tab === "posts" && (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Title</th>
+                  <th>Author</th>
+                  <th>Date</th>
+                  <th>Views</th>
+                  <th>Likes</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {posts.map(p => (
+                  <tr key={p.id} style={{ cursor: "pointer" }} onClick={() => go("article", p.id)}>
+                    <td style={{ fontWeight: 500, maxWidth: 280 }}>{p.title}</td>
+                    <td style={{ color: "var(--text-muted)" }}>{p.author}</td>
+                    <td style={{ color: "var(--text-faint)", fontSize: "0.8rem" }}>{p.date}</td>
+                    <td>{p.views.toLocaleString()}</td>
+                    <td>{p.likes}</td>
+                    <td><span className={`status-pill status-${p.status}`}>{p.status}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {tab === "users" && (
+            <table className="data-table">
+              <thead>
+                <tr><th>Author</th><th>Role</th><th>Articles</th><th>Followers</th><th>Joined</th></tr>
+              </thead>
+              <tbody>
+                {authors.map(a => (
+                  <tr key={a.id} style={{ cursor: "pointer" }} onClick={() => go("author", a.id)}>
+                    <td style={{ fontWeight: 500 }}>{a.name}</td>
+                    <td style={{ color: "var(--text-muted)" }}>{a.role}</td>
+                    <td>{a.articles}</td>
+                    <td>{a.followers.toLocaleString()}</td>
+                    <td style={{ color: "var(--text-faint)", fontSize: "0.8rem" }}>{a.joined}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {tab === "comments" && (
+            <table className="data-table">
+              <thead>
+                <tr><th>Author</th><th>Comment</th><th>Article</th><th>Date</th></tr>
+              </thead>
+              <tbody>
+                {Object.entries(comments).flatMap(([postId, cs]) =>
+                  cs.map(c => (
+                    <tr key={c.id}>
+                      <td style={{ fontWeight: 500, whiteSpace: "nowrap" }}>{c.author}</td>
+                      <td style={{ color: "var(--text-muted)", maxWidth: 320 }}>{c.text.slice(0, 80)}{c.text.length > 80 ? "…" : ""}</td>
+                      <td style={{ color: "var(--accent)", cursor: "pointer", whiteSpace: "nowrap" }} onClick={() => go("article", +postId)}>Post #{postId}</td>
+                      <td style={{ color: "var(--text-faint)", fontSize: "0.8rem", whiteSpace: "nowrap" }}>{c.date}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          )}
+
+          {tab === "analytics" && (
+            <>
+              <div className="metric-cards">
+                {[
+                  { num: totalViews.toLocaleString(), label: "Total views" },
+                  { num: totalLikes, label: "Total likes" },
+                  { num: totalComments, label: "Comments" },
+                  { num: Math.round(totalViews / posts.length).toLocaleString(), label: "Avg views/post" },
+                ].map(m => (
+                  <div key={m.label} className="metric-card">
+                    <span className="metric-num">{m.num}</span>
+                    <div className="metric-label">{m.label}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 10, padding: 20 }}>
+                <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--text-faint)", marginBottom: 16 }}>Top articles by views</div>
+                {[...posts].sort((a, b) => b.views - a.views).map(p => (
+                  <div key={p.id} style={{ marginBottom: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, fontSize: "0.875rem" }}>
+                      <span style={{ fontWeight: 500 }}>{p.title.slice(0, 50)}…</span>
+                      <span style={{ color: "var(--text-faint)", flexShrink: 0, marginLeft: 8 }}>{p.views.toLocaleString()}</span>
+                    </div>
+                    <div style={{ background: "var(--border)", height: 4, borderRadius: 2 }}>
+                      <div style={{ background: "var(--accent)", height: "100%", borderRadius: 2, width: (p.views / 6102 * 100) + "%", transition: "width 0.4s ease" }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Auth Modal ─── */
+function AuthModal({ mode, setMode, onLogin, onClose }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  function submit() {
+    if (!email || !password) { setError("All fields are required."); return; }
+    if (mode === "signup" && !name) { setError("Name is required."); return; }
+    if (password.length < 6) { setError("Password must be at least 6 characters."); return; }
+    onLogin({ name: name || email.split("@")[0], email });
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal">
+        <div className="modal-header">
+          <span className="modal-title">{mode === "login" ? "Welcome back" : "Join StackFoundry"}</span>
+          <button className="modal-close" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          {mode === "signup" && (
+            <div className="form-group">
+              <label className="form-label">Full name</label>
+              <input className="form-input" placeholder="Ada Lovelace" value={name} onChange={e => setName(e.target.value)} />
+            </div>
+          )}
+          <div className="form-group">
+            <label className="form-label">Email</label>
+            <input className="form-input" type="email" placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Password</label>
+            <input className="form-input" type="password" placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} />
+            {error && <div className="form-error">{error}</div>}
+          </div>
+          <button className="form-submit" onClick={submit}>{mode === "login" ? "Log in" : "Create account"}</button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "14px 0", color: "var(--text-faint)", fontSize: "0.8rem" }}>
+            <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+            or
+            <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+          </div>
+          <button className="btn btn-secondary" style={{ width: "100%", justifyContent: "center" }} onClick={() => onLogin({ name: "Demo User", email: "demo@stackfoundry.dev" })}>
+            Continue as Demo User
+          </button>
+          <div className="form-footer">
+            {mode === "login"
+              ? <> Don't have an account? <button onClick={() => setMode("signup")}>Sign up free</button></>
+              : <> Already have an account? <button onClick={() => setMode("login")}>Log in</button></>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── PostMeta (shared small component) ─── */
+function PostMeta({ post, go }) {
+  return (
+    <div className="post-meta">
+      <span className="post-author" onClick={e => { e.stopPropagation(); go?.("author", post.authorId); }}>{post.author}</span>
+      <span className="post-meta-sep">·</span>
+      <span>{post.date}</span>
+      <span className="post-meta-sep">·</span>
+      <span>{post.readTime} min read</span>
+    </div>
+  );
+}
+
+/* ─── Mount ─── */
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
