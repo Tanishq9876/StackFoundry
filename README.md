@@ -9,7 +9,7 @@ This project demonstrates a full blog-style frontend with features like article 
 ## Live Demo
 
 🔗 **View the website here:**  
-https://YOUR_NETLIFY_LINK
+https://stackfoundy.netlify.app/
 
 ---
 
